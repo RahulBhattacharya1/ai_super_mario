@@ -187,7 +187,8 @@ if autopilot:
 
 # When Autopilot is on, refresh roughly every 700ms to fetch the next move
 if autopilot:
-    st.experimental_autorefresh(interval=700, key="ai_tick")
+    from streamlit.components.v1 import html as _html
+    _html("<script>setTimeout(()=>window.parent.location.reload(), 700);</script>", height=0)
 
 # ======================= Canvas Game (arrow keys + animation) =======================
 GAME_HTML = """
