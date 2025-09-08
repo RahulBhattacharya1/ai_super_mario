@@ -205,7 +205,7 @@ GAME_HTML = """
 
 <script>
 (function(){
-  const AI_MOVE = "__AI_MOVE__";  // injected by Streamlit on each rerun
+  const AI_MOVE = "__AI_MOVE__";  // injected by Streamlit each rerun
 
   const c = document.getElementById('game');
   const ctx = c.getContext('2d');
@@ -213,12 +213,7 @@ GAME_HTML = """
   const W = c.width, H = c.height, GRAV = 0.9, FRICTION = 0.8;
   const groundY = H - 64;
 
-  const mario = {
-    x: 120, y: groundY - 48, w: 34, h: 48,
-    vx: 0, vy: 0, dir: 1, onGround: true,
-    runFrame: 0, runTimer: 0
-  };
-
+  // --- Static level ---
   const platforms = [
     {x:0, y:groundY, w:W, h:64, color:'#8B5A2B'},
     {x:280, y:groundY-120, w:120, h:18, color:'#8B5A2B'},
@@ -228,25 +223,53 @@ GAME_HTML = """
     {x:320, y:groundY-150, r:10, taken:false},
     {x:580, y:groundY-150, r:10, taken:false}
   ];
-  const flag = {x: W-120, y: groundY-160, w:12, h:160, color:'#2dd4bf'};
+  const flag = {x: 840, y: groundY-160, w:12, h:160, color:'#2dd4bf'};
 
+  // --- Player ---
+  const mario = { x:120, y: groundY-48, w:34, h:48, vx:0, vy:0, dir:1, onGround:true, runFrame:0, runTimer:0 };
+
+  // ====== PERSISTENCE ======
+  const STORE_KEY = "sm_mini_state_v1";
+  function loadState(){
+    try{
+      const raw = localStorage.getItem(STORE_KEY);
+      if(!raw) return;
+      const s = JSON.parse(raw);
+      if (s && s.mario) {
+        mario.x = s.mario.x; mario.y = s.mario.y;
+        mario.vx = s.mario.vx; mario.vy = s.mario.vy;
+        mario.dir = s.mario.dir; mario.onGround = !!s.mario.onGround;
+      }
+      if (Array.isArray(s.coins)){
+        for (let i=0;i<Math.min(coins.length, s.coins.length);i++){
+          coins[i].taken = !!s.coins[i].taken;
+        }
+      }
+    }catch(e){}
+  }
+  function saveState(){
+    try{
+      const s = {
+        mario: {x:mario.x, y:mario.y, vx:mario.vx, vy:mario.vy, dir:mario.dir, onGround:mario.onGround},
+        coins: coins.map(c=>({taken:c.taken}))
+      };
+      localStorage.setItem(STORE_KEY, JSON.stringify(s));
+    }catch(e){}
+  }
+  function hardReset(){
+    localStorage.removeItem(STORE_KEY);
+    mario.x=120; mario.y=groundY-48; mario.vx=0; mario.vy=0; mario.dir=1; mario.onGround=true; mario.runFrame=0; mario.runTimer=0;
+    coins.forEach(c=>c.taken=false);
+  }
+  loadState();
+
+  // ====== INPUT ======
   const keys = {};
   window.addEventListener('keydown', (e)=>{ keys[e.key.toLowerCase()] = true; });
   window.addEventListener('keyup',   (e)=>{ keys[e.key.toLowerCase()] = false; });
 
-  function reset(){
-    mario.x = 120; mario.y = groundY - 48;
-    mario.vx = 0; mario.vy = 0; mario.dir = 1;
-    mario.onGround = true; mario.runFrame = 0; mario.runTimer = 0;
-    coins.forEach(c => c.taken = false);
-  }
-
-  function aabb(ax,ay,aw,ah,bx,by,bw,bh){
-    return ax < bx+bw && ax+aw > bx && ay < by+bh && ay+ah > by;
-  }
-
-  // Apply server-suggested move once per load (simulate a short key tap)
-  function applyAIMove(){
+  // Apply server AI move once per load (short tap)
+  (function applyAIMove(){
     const tapMs = 120;
     if (AI_MOVE === "left"){
       keys["arrowleft"] = true; setTimeout(()=>keys["arrowleft"]=false, tapMs);
@@ -255,30 +278,37 @@ GAME_HTML = """
     } else if (AI_MOVE === "jump"){
       keys[" "] = true; setTimeout(()=>keys[" "]=false, tapMs);
     }
+  })();
+
+  function aabb(ax,ay,aw,ah,bx,by,bw,bh){
+    return ax < bx+bw && ax+aw > bx && ay < by+bh && ay+ah > by;
   }
-  applyAIMove();
 
   function step(){
+    // Manual controls (also affected by AI tap)
     const left  = keys['arrowleft'] || keys['a'];
     const right = keys['arrowright']|| keys['d'];
     const jump  = keys['arrowup'] || keys['w'] || keys[' '];
+    if (keys['r']) { hardReset(); }
 
-    if (keys['r']) reset();
-
+    // Horizontal
     let accel = 0.6;
     if (left)  { mario.vx -= accel; mario.dir = -1; }
     if (right) { mario.vx += accel; mario.dir =  1; }
 
+    // Jump
     if (jump && mario.onGround){
       mario.vy = -16;
       mario.onGround = false;
     }
 
-    mario.vy +=  GRAV;
-    mario.x  +=  mario.vx;
-    mario.y  +=  mario.vy;
-    mario.vx *=  FRICTION;
+    // Physics
+    mario.vy += GRAV;
+    mario.x  += mario.vx;
+    mario.y  += mario.vy;
+    mario.vx *= FRICTION;
 
+    // Collisions
     mario.onGround = false;
     for (const p of platforms){
       if (aabb(mario.x, mario.y, mario.w, mario.h, p.x, p.y, p.w, p.h)){
@@ -294,6 +324,7 @@ GAME_HTML = """
       }
     }
 
+    // Coins
     for (const c of coins){
       if (!c.taken){
         const dx = (mario.x+mario.w/2) - c.x;
@@ -302,8 +333,7 @@ GAME_HTML = """
       }
     }
 
-    const atFlag = (mario.x + mario.w) > flag.x - 4;
-
+    // Animation
     if (Math.abs(mario.vx) > 0.5 && mario.onGround){
       mario.runTimer += 1;
       if (mario.runTimer % 6 === 0) mario.runFrame = (mario.runFrame + 1) % 4;
@@ -311,21 +341,18 @@ GAME_HTML = """
       mario.runFrame = 0; mario.runTimer = 0;
     }
 
-    // draw
+    // Draw
     ctx.clearRect(0,0,W,H);
     ctx.fillStyle = '#0b1220'; ctx.fillRect(0,0,W,H);
     ctx.fillStyle = '#0e1730'; ctx.fillRect(0,0,W, H*0.65);
 
-    for (const p of platforms){
-      ctx.fillStyle = p.color;
-      ctx.fillRect(p.x, p.y, p.w, p.h);
-    }
+    for (const p of platforms){ ctx.fillStyle = p.color; ctx.fillRect(p.x, p.y, p.w, p.h); }
 
-    ctx.fillStyle = flag.color;
-    ctx.fillRect(flag.x, flag.y, flag.w, flag.h);
-    ctx.fillStyle = '#34d399';
-    ctx.fillRect(flag.x+flag.w, flag.y, 24, 14);
+    // Flag
+    ctx.fillStyle = flag.color; ctx.fillRect(flag.x, flag.y, flag.w, flag.h);
+    ctx.fillStyle = '#34d399';  ctx.fillRect(flag.x+flag.w, flag.y, 24, 14);
 
+    // Coins
     for (const c of coins){
       if (c.taken) continue;
       const g = ctx.createRadialGradient(c.x, c.y, 2, c.x, c.y, c.r);
@@ -335,49 +362,28 @@ GAME_HTML = """
       ctx.strokeStyle = '#996515'; ctx.lineWidth = 2; ctx.stroke();
     }
 
-    const bodyColor = '#60a5fa';
-    const faceColor = '#fde68a';
+    // Mario
+    const bodyColor = '#60a5fa', faceColor = '#fde68a';
     const x = mario.x, y = mario.y, w = mario.w, h = mario.h;
-
     ctx.fillStyle = bodyColor;
     ctx.fillRect(x, y+h-14, w, 14);
     if (mario.onGround){
-      if (mario.runFrame % 2 === 0){
-        ctx.fillRect(x, y+h-14, 10, 14);
-      }else{
-        ctx.fillRect(x+w-10, y+h-14, 10, 14);
-      }
+      if (mario.runFrame % 2 === 0) ctx.fillRect(x, y+h-14, 10, 14);
+      else ctx.fillRect(x+w-10, y+h-14, 10, 14);
     }
-
     ctx.fillRect(x, y+12, w, h-26);
-
-    ctx.fillStyle = faceColor;
-    ctx.fillRect(x+6, y, 22, 18);
-
+    ctx.fillStyle = faceColor; ctx.fillRect(x+6, y, 22, 18);
     ctx.fillStyle = '#1f2937';
     const eyeDX = mario.dir === 1 ? 3 : -3;
-    ctx.fillRect(x+12+eyeDX, y+6, 3, 3);
-    ctx.fillRect(x+18+eyeDX, y+6, 3, 3);
+    ctx.fillRect(x+12+eyeDX, y+6, 3, 3); ctx.fillRect(x+18+eyeDX, y+6, 3, 3);
 
-    if (!mario.onGround){
-      ctx.globalAlpha = 0.25;
-      ctx.fillStyle = '#60a5fa';
-      ctx.fillRect(x, y+h, w, 6);
-      ctx.globalAlpha = 1.0;
-    }
-
-    if (atFlag){
-      ctx.save();
-      ctx.globalAlpha = 0.15;
-      ctx.fillStyle = '#22d3ee';
-      ctx.fillRect(flag.x-20, flag.y-20, 80, flag.h+40);
-      ctx.restore();
-    }
+    // Persist after drawing so the next reload continues from here
+    saveState();
 
     requestAnimationFrame(step);
   }
 
-  reset();
+  // Boot
   requestAnimationFrame(step);
 })();
 </script>
