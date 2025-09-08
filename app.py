@@ -1,19 +1,30 @@
-# app.py — Super Mario (Mini) with Arrow Keys + Animated Canvas (embedded via components)
-# Keeps your template: remote budget loader, usage guardrails, provider switch (still available for AI policies if you want),
-# but the gameplay is handled in a 60 FPS JS canvas so controls feel like a real game.
+# app.py — Super Mario (Mini) with Arrow Keys, Animated Canvas, and AI Autopilot
+# Keeps your standard template: remote budget loader, rate limits, daily budget panel, provider switch.
+# The gameplay is rendered in a 60 FPS HTML5 canvas; AI Autopilot triggers simulated key taps.
 
-import os, time, datetime as dt, types, urllib.request
+import os
+import time
+import datetime as dt
+import types
+import urllib.request
+import json
 import streamlit as st
+from streamlit.components.v1 import html as st_html
 
 try:
     from openai import OpenAI
 except Exception:
     OpenAI = None
 
+# ======================= App Config =======================
 st.set_page_config(page_title="Super Mario (Mini)", layout="wide")
 
-# ======================= Runtime budget & limits (same skeleton) =======================
-BUDGET_URL = os.getenv("BUDGET_URL", "https://raw.githubusercontent.com/RahulBhattacharya1/shared_config/main/budget.py")
+# ======================= Runtime budget & limits (same skeleton as your other apps) =======================
+BUDGET_URL = os.getenv(
+    "BUDGET_URL",
+    "https://raw.githubusercontent.com/RahulBhattacharya1/shared_config/main/budget.py",
+)
+
 DEF = {
     "COOLDOWN_SECONDS": 30,
     "DAILY_LIMIT": 40,
@@ -99,7 +110,7 @@ def _record_success():
         cnt = _shared_hourly_counters()
         cnt[bucket] = cnt.get(bucket, 0) + 1
 
-# ======================= Sidebar (unchanged style) =======================
+# ======================= Sidebar =======================
 st.title("Super Mario (Mini)")
 
 with st.sidebar:
@@ -108,6 +119,7 @@ with st.sidebar:
     model    = st.selectbox("Model (OpenAI)", ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"])
     temp     = st.slider("Creativity (OpenAI)", 0.0, 1.0, 0.4, 0.05)
     max_tok  = st.slider("Max tokens (OpenAI)", 256, 2048, 500, 32)
+    autopilot = st.toggle("Autopilot (AI)", value=False, help="If on, the AI taps keys about twice a second.")
 
     _init_rate_limits()
     ss = st.session_state
@@ -123,13 +135,65 @@ with st.sidebar:
         unsafe_allow_html=True
     )
 
-# ======================= Canvas Game (arrow keys + animation) =======================
-from streamlit.components.v1 import html as st_html
+# ======================= AI Policy (server-side) =======================
+def offline_policy() -> str:
+    # Simple periodic policy: mostly move right, occasionally jump
+    # Keeps it deterministic but lively when autopilot is on.
+    t = int(time.time() * 1000) // 700
+    if t % 9 == 0:
+        return "jump"
+    return "right"
 
+def call_openai_policy(model: str, temp: float, max_tok: int) -> str:
+    # Stateless prompt: ask for a single move. You can extend this with level state later.
+    key = st.secrets.get("OPENAI_API_KEY", "")
+    if not key:
+        raise RuntimeError("OPENAI_API_KEY missing in .streamlit/secrets.toml")
+    if OpenAI is None:
+        raise RuntimeError("openai package not available")
+    client = OpenAI(api_key=key)
+    sys = 'You are controlling a simple platformer character. Return JSON only: {"move":"left|right|jump|stay"}.'
+    usr = 'Choose the best single move to progress toward the goal flag to the right on mostly flat terrain with a few low platforms.'
+    resp = client.chat.completions.create(
+        model=model,
+        temperature=float(temp),
+        max_tokens=int(max_tok),
+        messages=[{"role":"system","content":sys},{"role":"user","content":usr}]
+    )
+    text = resp.choices[0].message.content.strip()
+    if text.startswith("```"):
+        text = text.strip("`").split("\n", 1)[-1].strip()
+    try:
+        mv = str(json.loads(text).get("move", "stay")).lower()
+    except Exception:
+        mv = "stay"
+    return mv if mv in {"left","right","jump","stay"} else "stay"
+
+# Decide Autopilot move (once per rerun)
+ai_move = ""
+if autopilot:
+    ok, msg, _ = _can_call_now()
+    try:
+        if provider == "OpenAI" and ok:
+            ai_move = call_openai_policy(model, temp, max_tok)
+            _record_success()
+        else:
+            if provider == "OpenAI" and not ok:
+                st.warning(msg)
+            ai_move = offline_policy()
+    except Exception as e:
+        st.error(f"AI policy error: {e}. Using offline policy.")
+        ai_move = offline_policy()
+
+# When Autopilot is on, refresh roughly every 700ms to fetch the next move
+if autopilot:
+    st.autorefresh(interval=700, key="ai_tick")
+
+# ======================= Canvas Game (arrow keys + animation) =======================
 GAME_HTML = """
 <div id="wrap">
   <canvas id="game" width="960" height="480"></canvas>
-  <div id="help">← → to run • ↑ / Space to jump • R to reset</div>
+  <div id="help">Left/Right to run • Up/Space to jump • R to reset</div>
 </div>
 
 <style>
@@ -140,22 +204,22 @@ GAME_HTML = """
 
 <script>
 (function(){
+  const AI_MOVE = "__AI_MOVE__";  // injected by Streamlit on each rerun
+
   const c = document.getElementById('game');
   const ctx = c.getContext('2d');
 
   const W = c.width, H = c.height, GRAV = 0.9, FRICTION = 0.8;
   const groundY = H - 64;
 
-  // Simple sprite frames (colored rectangles to simulate animation)
   const mario = {
     x: 120, y: groundY - 48, w: 34, h: 48,
     vx: 0, vy: 0, dir: 1, onGround: true,
     runFrame: 0, runTimer: 0
   };
 
-  // Platforms + coins + flag
   const platforms = [
-    {x:0, y:groundY, w:W, h:64, color:'#8B5A2B'},                // ground
+    {x:0, y:groundY, w:W, h:64, color:'#8B5A2B'},
     {x:280, y:groundY-120, w:120, h:18, color:'#8B5A2B'},
     {x:540, y:groundY-120, w:120, h:18, color:'#8B5A2B'}
   ];
@@ -180,8 +244,20 @@ GAME_HTML = """
     return ax < bx+bw && ax+aw > bx && ay < by+bh && ay+ah > by;
   }
 
+  // Apply server-suggested move once per load (simulate a short key tap)
+  function applyAIMove(){
+    const tapMs = 120;
+    if (AI_MOVE === "left"){
+      keys["arrowleft"] = true; setTimeout(()=>keys["arrowleft"]=false, tapMs);
+    } else if (AI_MOVE === "right"){
+      keys["arrowright"] = true; setTimeout(()=>keys["arrowright"]=false, tapMs);
+    } else if (AI_MOVE === "jump"){
+      keys[" "] = true; setTimeout(()=>keys[" "]=false, tapMs);
+    }
+  }
+  applyAIMove();
+
   function step(){
-    // input
     const left  = keys['arrowleft'] || keys['a'];
     const right = keys['arrowright']|| keys['d'];
     const jump  = keys['arrowup'] || keys['w'] || keys[' '];
@@ -192,41 +268,31 @@ GAME_HTML = """
     if (left)  { mario.vx -= accel; mario.dir = -1; }
     if (right) { mario.vx += accel; mario.dir =  1; }
 
-    // jump
     if (jump && mario.onGround){
       mario.vy = -16;
       mario.onGround = false;
     }
 
-    // physics
-    mario.vy += GRAV;
-    mario.x  += mario.vx;
-    mario.y  += mario.vy;
-    mario.vx *= FRICTION;
+    mario.vy +=  GRAV;
+    mario.x  +=  mario.vx;
+    mario.y  +=  mario.vy;
+    mario.vx *=  FRICTION;
 
-    // collisions with platforms
     mario.onGround = false;
     for (const p of platforms){
       if (aabb(mario.x, mario.y, mario.w, mario.h, p.x, p.y, p.w, p.h)){
-        // simple resolution: from top
         if (mario.vy > 0 && mario.y + mario.h - p.y < 24){
-          mario.y = p.y - mario.h;
-          mario.vy = 0;
-          mario.onGround = true;
+          mario.y = p.y - mario.h; mario.vy = 0; mario.onGround = true;
         }else if (mario.vy < 0 && p.y + p.h - mario.y < 24){
-          mario.y = p.y + p.h;
-          mario.vy = 0.5;
+          mario.y = p.y + p.h; mario.vy = 0.5;
         }else if (mario.vx > 0){
-          mario.x = p.x - mario.w - 0.01;
-          mario.vx = 0;
+          mario.x = p.x - mario.w - 0.01; mario.vx = 0;
         }else if (mario.vx < 0){
-          mario.x = p.x + p.w + 0.01;
-          mario.vx = 0;
+          mario.x = p.x + p.w + 0.01; mario.vx = 0;
         }
       }
     }
 
-    // coins
     for (const c of coins){
       if (!c.taken){
         const dx = (mario.x+mario.w/2) - c.x;
@@ -235,38 +301,30 @@ GAME_HTML = """
       }
     }
 
-    // flag reached -> gentle confetti glow
     const atFlag = (mario.x + mario.w) > flag.x - 4;
 
-    // run animation
     if (Math.abs(mario.vx) > 0.5 && mario.onGround){
       mario.runTimer += 1;
       if (mario.runTimer % 6 === 0) mario.runFrame = (mario.runFrame + 1) % 4;
-    }else{
+    } else {
       mario.runFrame = 0; mario.runTimer = 0;
     }
 
     // draw
     ctx.clearRect(0,0,W,H);
-
-    // background parallax
     ctx.fillStyle = '#0b1220'; ctx.fillRect(0,0,W,H);
     ctx.fillStyle = '#0e1730'; ctx.fillRect(0,0,W, H*0.65);
 
-    // platforms
     for (const p of platforms){
       ctx.fillStyle = p.color;
       ctx.fillRect(p.x, p.y, p.w, p.h);
     }
 
-    // flag
     ctx.fillStyle = flag.color;
     ctx.fillRect(flag.x, flag.y, flag.w, flag.h);
-    // small banner
     ctx.fillStyle = '#34d399';
     ctx.fillRect(flag.x+flag.w, flag.y, 24, 14);
 
-    // coins
     for (const c of coins){
       if (c.taken) continue;
       const g = ctx.createRadialGradient(c.x, c.y, 2, c.x, c.y, c.r);
@@ -276,15 +334,12 @@ GAME_HTML = """
       ctx.strokeStyle = '#996515'; ctx.lineWidth = 2; ctx.stroke();
     }
 
-    // mario sprite (simple animated rectangles + "face")
-    // body
     const bodyColor = '#60a5fa';
     const faceColor = '#fde68a';
     const x = mario.x, y = mario.y, w = mario.w, h = mario.h;
 
-    // legs animation (alternate rectangles)
     ctx.fillStyle = bodyColor;
-    ctx.fillRect(x, y+h-14, w, 14); // base
+    ctx.fillRect(x, y+h-14, w, 14);
     if (mario.onGround){
       if (mario.runFrame % 2 === 0){
         ctx.fillRect(x, y+h-14, 10, 14);
@@ -293,20 +348,16 @@ GAME_HTML = """
       }
     }
 
-    // torso
     ctx.fillRect(x, y+12, w, h-26);
 
-    // head
     ctx.fillStyle = faceColor;
     ctx.fillRect(x+6, y, 22, 18);
 
-    // face details (eyes + direction)
     ctx.fillStyle = '#1f2937';
     const eyeDX = mario.dir === 1 ? 3 : -3;
     ctx.fillRect(x+12+eyeDX, y+6, 3, 3);
     ctx.fillRect(x+18+eyeDX, y+6, 3, 3);
 
-    // jump squash & stretch hint
     if (!mario.onGround){
       ctx.globalAlpha = 0.25;
       ctx.fillStyle = '#60a5fa';
@@ -314,7 +365,6 @@ GAME_HTML = """
       ctx.globalAlpha = 1.0;
     }
 
-    // victory glow
     if (atFlag){
       ctx.save();
       ctx.globalAlpha = 0.15;
@@ -326,11 +376,13 @@ GAME_HTML = """
     requestAnimationFrame(step);
   }
 
-  // start
   reset();
   requestAnimationFrame(step);
 })();
 </script>
 """
 
-st_html(GAME_HTML, height=560, scrolling=False)
+# Inject the chosen move into the HTML
+GAME_HTML_INJECTED = GAME_HTML.replace("__AI_MOVE__", ai_move or "")
+
+st_html(GAME_HTML_INJECTED, height=560, scrolling=False)
