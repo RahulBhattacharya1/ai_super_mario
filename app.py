@@ -1,13 +1,8 @@
-# app.py — Super Mario (Mini) — colored tiles renderer (no emojis), same template & guardrails
+# app.py — Super Mario (Mini) with Arrow Keys + Animated Canvas (embedded via components)
+# Keeps your template: remote budget loader, usage guardrails, provider switch (still available for AI policies if you want),
+# but the gameplay is handled in a 60 FPS JS canvas so controls feel like a real game.
 
-import os
-import time
-import json
-import random
-import datetime as dt
-import types
-import urllib.request
-
+import os, time, datetime as dt, types, urllib.request
 import streamlit as st
 
 try:
@@ -15,15 +10,10 @@ try:
 except Exception:
     OpenAI = None
 
-# ======================= App Config =======================
 st.set_page_config(page_title="Super Mario (Mini)", layout="wide")
 
-# ======================= Runtime budget & limits (matches your template) =======================
-BUDGET_URL = os.getenv(
-    "BUDGET_URL",
-    "https://raw.githubusercontent.com/RahulBhattacharya1/shared_config/main/budget.py",
-)
-
+# ======================= Runtime budget & limits (same skeleton) =======================
+BUDGET_URL = os.getenv("BUDGET_URL", "https://raw.githubusercontent.com/RahulBhattacharya1/shared_config/main/budget.py")
 DEF = {
     "COOLDOWN_SECONDS": 30,
     "DAILY_LIMIT": 40,
@@ -33,25 +23,23 @@ DEF = {
     "VERSION": "fallback-local",
 }
 
-def _fetch(u: str) -> dict:
-    """Fetch remote budget.py and extract expected keys with fallbacks."""
+def _fetch_budget(u: str) -> dict:
     mod = types.ModuleType("budget_remote")
     with urllib.request.urlopen(u, timeout=5) as r:
-        code = r.read().decode()
+        code = r.read().decode("utf-8")
     exec(compile(code, "budget_remote", "exec"), mod.__dict__)
     return {k: getattr(mod, k, DEF[k]) for k in DEF}
 
-def _load_cfg(ttl: int = 300) -> dict:
+def _load_cfg(ttl=300):
     now = time.time()
     cache = st.session_state.get("_budget_cache")
     ts = st.session_state.get("_budget_cache_ts", 0)
     if cache and (now - ts) < ttl:
         return cache
     try:
-        cfg = _fetch(BUDGET_URL)
+        cfg = _fetch_budget(BUDGET_URL)
     except Exception:
         cfg = DEF.copy()
-    # Env overrides for per-deploy tuning
     cfg["DAILY_BUDGET"] = float(os.getenv("DAILY_BUDGET", cfg["DAILY_BUDGET"]))
     cfg["EST_COST_PER_GEN"] = float(os.getenv("EST_COST_PER_GEN", cfg["EST_COST_PER_GEN"]))
     st.session_state["_budget_cache"] = cfg
@@ -111,153 +99,9 @@ def _record_success():
         cnt = _shared_hourly_counters()
         cnt[bucket] = cnt.get(bucket, 0) + 1
 
-# ======================= Mini “platformer” world =======================
-W, H = 12, 6  # width, height
-
-# Tile keys
-AIR = " "
-GROUND = "_"
-COIN = "o"
-FLAG = "F"
-
-# Colored tile renderer (no emojis)
-TILE_PX = 28  # size of each square
-PALETTE = {
-    AIR:   "#0b1220",  # dark background (sky)
-    GROUND:"#8B5A2B",  # brown
-    COIN:  "#f2c94c",  # gold
-    FLAG:  "#2dd4bf",  # teal flag tile
-    "M":   "#60a5fa",  # player
-}
-
-def new_level():
-    grid = [[AIR]*W for _ in range(H)]
-    # ground
-    for x in range(W):
-        grid[H-1][x] = GROUND
-    # simple platforms
-    for x in range(2, 10, 3):
-        grid[H-3][x] = GROUND
-    # coins and flag
-    coins = {(H-2, 5), (H-3, 2), (H-3, 8)}
-    mario_start = (H-2, 1)
-    flag = (H-2, W-2)
-    return grid, mario_start, coins, flag
-
-def render(grid, mario, coins, flag):
-    # Build a tiny CSS grid using inline HTML for crisp colored squares.
-    rows_html = []
-    for r in range(H):
-        cells = []
-        for c in range(W):
-            key = grid[r][c]
-            # overlay order: Mario > Flag > Coin > Ground/Air
-            if (r, c) == mario:
-                color = PALETTE["M"]
-            elif (r, c) == flag:
-                color = PALETTE[FLAG]
-            elif (r, c) in coins:
-                color = PALETTE[COIN]
-            else:
-                color = PALETTE[key]
-            cells.append(
-                f"<span class='cell' style='background:{color}'></span>"
-            )
-        rows_html.append("<div class='row'>" + "".join(cells) + "</div>")
-
-    html = f"""
-<div class="board">
-  {''.join(rows_html)}
-</div>
-<style>
-.board {{
-  display: inline-flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 6px;
-  background: #0a0f1a;
-  border-radius: 12px;
-  box-shadow: 0 6px 24px rgba(0,0,0,.35);
-}}
-.board .row {{
-  display: inline-flex;
-  gap: 4px;
-}}
-.board .cell {{
-  display: inline-block;
-  width: {TILE_PX}px;
-  height: {TILE_PX}px;
-  border-radius: 6px;
-}}
-/* Light outline to separate ground from sky slightly */
-.board .cell[style*="{PALETTE[GROUND]}"] {{
-  box-shadow: inset 0 0 0 1px rgba(0,0,0,.25);
-}}
-</style>
-"""
-    st.markdown(html, unsafe_allow_html=True)
-
-def solid(grid, r, c):
-    return not (0 <= r < H and 0 <= c < W) or grid[r][c] == GROUND
-
-def step_physics(grid, mario, vy):
-    r, c = mario
-    # gravity
-    vy += 1
-    target_r = r + (1 if vy > 0 else -1)
-    if solid(grid, target_r, c):
-        vy = 0
-    else:
-        r = target_r
-    return (r, c), vy
-
-def move_lr(grid, mario, dx):
-    r, c = mario
-    nc = c + dx
-    if not solid(grid, r, nc):
-        c = nc
-    return (r, c)
-
-def offline_policy(mario, flag):
-    # Simple greedy policy: move toward flag; occasionally jump
-    mr, mc = mario
-    fr, fc = flag
-    if fc > mc:
-        return "right"
-    if fc < mc:
-        return "left"
-    return "jump" if random.random() < 0.2 else "stay"
-
-def call_openai(model, state, temp, max_tok) -> str:
-    key = st.secrets.get("OPENAI_API_KEY", "")
-    if not key:
-        raise RuntimeError("OPENAI_API_KEY missing")
-    if OpenAI is None:
-        raise RuntimeError("openai package not available")
-    client = OpenAI(api_key=key)
-    sys = 'You are a Mario controller. Return JSON only: {"move":"left|right|jump|stay"}.'
-    usr = json.dumps(state)
-    resp = client.chat.completions.create(
-        model=model,
-        temperature=float(temp),
-        max_tokens=int(max_tok),
-        messages=[{"role":"system","content":sys},{"role":"user","content":usr}]
-    )
-    text = resp.choices[0].message.content.strip()
-    if text.startswith("```"):
-        text = text.strip("`").split("\n", 1)[-1].strip()
-    mv = str(json.loads(text).get("move", "stay")).lower()
-    return mv if mv in {"left","right","jump","stay"} else "stay"
-
-def card(title, subtitle=""):
-    st.markdown(
-        f"<div style='border:1px solid #e5e7eb; padding:.6rem .9rem; border-radius:10px; margin:.6rem 0'>"
-        f"<b>{title}</b><div>{subtitle}</div></div>",
-        unsafe_allow_html=True
-    )
-
-# ======================= UI =======================
+# ======================= Sidebar (unchanged style) =======================
 st.title("Super Mario (Mini)")
+
 with st.sidebar:
     st.subheader("Generator")
     provider = st.selectbox("Provider", ["OpenAI", "Offline (rule-based)"])
@@ -279,65 +123,214 @@ with st.sidebar:
         unsafe_allow_html=True
     )
 
-# ======================= State =======================
-if "mario" not in st.session_state:
-    g, m, coins, flag = new_level()
-    st.session_state.mario = {"grid": g, "mario": m, "vy": 0, "coins": coins, "flag": flag, "score": 0}
+# ======================= Canvas Game (arrow keys + animation) =======================
+from streamlit.components.v1 import html as st_html
 
-S = st.session_state.mario
+GAME_HTML = """
+<div id="wrap">
+  <canvas id="game" width="960" height="480"></canvas>
+  <div id="help">← → to run • ↑ / Space to jump • R to reset</div>
+</div>
 
-# Render current board
-render(S["grid"], S["mario"], S["coins"], S["flag"])
+<style>
+  #wrap{display:flex;flex-direction:column;align-items:center;gap:8px;}
+  #game{background:#0b1220;border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.35)}
+  #help{font:14px/1.2 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; opacity:.8}
+</style>
 
-# Controls
-c1, c2, c3, c4 = st.columns(4)
-mv = None
-with c1:
-    if st.button("Left"):
-        mv = "left"
-with c2:
-    if st.button("Right"):
-        mv = "right"
-with c3:
-    if st.button("Jump"):
-        mv = "jump"
-with c4:
-    if st.button("Reset"):
-        g, m, coins, flag = new_level()
-        S.update({"grid": g, "mario": m, "vy": 0, "coins": coins, "flag": flag, "score": 0})
+<script>
+(function(){
+  const c = document.getElementById('game');
+  const ctx = c.getContext('2d');
 
-# If no manual button, let the AI policy act
-if mv is None:
-    allowed, msg, _ = _can_call_now()
-    try:
-        if provider == "OpenAI" and allowed:
-            state = {"mario": S["mario"], "vy": S["vy"], "coins": list(map(list, S["coins"])), "flag": S["flag"]}
-            mv = call_openai(model, state, temp, max_tok)
-            _record_success()
-        else:
-            if provider == "OpenAI" and not allowed:
-                st.warning(msg)
-            mv = offline_policy(S["mario"], S["flag"])
-    except Exception as e:
-        st.error(f"AI policy error: {e}. Using offline.")
-        mv = offline_policy(S["mario"], S["flag"])
+  const W = c.width, H = c.height, GRAV = 0.9, FRICTION = 0.8;
+  const groundY = H - 64;
 
-# Apply movement inputs
-if mv == "left":
-    S["mario"] = move_lr(S["grid"], S["mario"], -1)
-elif mv == "right":
-    S["mario"] = move_lr(S["grid"], S["mario"], 1)
-elif mv == "jump" and S["vy"] == 0:
-    S["vy"] = -2
+  // Simple sprite frames (colored rectangles to simulate animation)
+  const mario = {
+    x: 120, y: groundY - 48, w: 34, h: 48,
+    vx: 0, vy: 0, dir: 1, onGround: true,
+    runFrame: 0, runTimer: 0
+  };
 
-# Physics tick
-S["mario"], S["vy"] = step_physics(S["grid"], S["mario"], S["vy"])
+  // Platforms + coins + flag
+  const platforms = [
+    {x:0, y:groundY, w:W, h:64, color:'#8B5A2B'},                // ground
+    {x:280, y:groundY-120, w:120, h:18, color:'#8B5A2B'},
+    {x:540, y:groundY-120, w:120, h:18, color:'#8B5A2B'}
+  ];
+  const coins = [
+    {x:320, y:groundY-150, r:10, taken:false},
+    {x:580, y:groundY-150, r:10, taken:false}
+  ];
+  const flag = {x: W-120, y: groundY-160, w:12, h:160, color:'#2dd4bf'};
 
-# Coin pickup
-if S["mario"] in S["coins"]:
-    S["coins"].remove(S["mario"])
-    S["score"] += 1
+  const keys = {};
+  window.addEventListener('keydown', (e)=>{ keys[e.key.toLowerCase()] = true; });
+  window.addEventListener('keyup',   (e)=>{ keys[e.key.toLowerCase()] = false; });
 
-# Re-render updated world
-render(S["grid"], S["mario"], S["coins"], S["flag"])
-card("Status", f"Coins: {S['score']}" if S["mario"] != S["flag"] else "Flag reached!")
+  function reset(){
+    mario.x = 120; mario.y = groundY - 48;
+    mario.vx = 0; mario.vy = 0; mario.dir = 1;
+    mario.onGround = true; mario.runFrame = 0; mario.runTimer = 0;
+    coins.forEach(c => c.taken = false);
+  }
+
+  function aabb(ax,ay,aw,ah,bx,by,bw,bh){
+    return ax < bx+bw && ax+aw > bx && ay < by+bh && ay+ah > by;
+  }
+
+  function step(){
+    // input
+    const left  = keys['arrowleft'] || keys['a'];
+    const right = keys['arrowright']|| keys['d'];
+    const jump  = keys['arrowup'] || keys['w'] || keys[' '];
+
+    if (keys['r']) reset();
+
+    let accel = 0.6;
+    if (left)  { mario.vx -= accel; mario.dir = -1; }
+    if (right) { mario.vx += accel; mario.dir =  1; }
+
+    // jump
+    if (jump && mario.onGround){
+      mario.vy = -16;
+      mario.onGround = false;
+    }
+
+    // physics
+    mario.vy += GRAV;
+    mario.x  += mario.vx;
+    mario.y  += mario.vy;
+    mario.vx *= FRICTION;
+
+    // collisions with platforms
+    mario.onGround = false;
+    for (const p of platforms){
+      if (aabb(mario.x, mario.y, mario.w, mario.h, p.x, p.y, p.w, p.h)){
+        // simple resolution: from top
+        if (mario.vy > 0 && mario.y + mario.h - p.y < 24){
+          mario.y = p.y - mario.h;
+          mario.vy = 0;
+          mario.onGround = true;
+        }else if (mario.vy < 0 && p.y + p.h - mario.y < 24){
+          mario.y = p.y + p.h;
+          mario.vy = 0.5;
+        }else if (mario.vx > 0){
+          mario.x = p.x - mario.w - 0.01;
+          mario.vx = 0;
+        }else if (mario.vx < 0){
+          mario.x = p.x + p.w + 0.01;
+          mario.vx = 0;
+        }
+      }
+    }
+
+    // coins
+    for (const c of coins){
+      if (!c.taken){
+        const dx = (mario.x+mario.w/2) - c.x;
+        const dy = (mario.y+mario.h/2) - c.y;
+        if (dx*dx + dy*dy < (c.r+16)*(c.r+16)) c.taken = true;
+      }
+    }
+
+    // flag reached -> gentle confetti glow
+    const atFlag = (mario.x + mario.w) > flag.x - 4;
+
+    // run animation
+    if (Math.abs(mario.vx) > 0.5 && mario.onGround){
+      mario.runTimer += 1;
+      if (mario.runTimer % 6 === 0) mario.runFrame = (mario.runFrame + 1) % 4;
+    }else{
+      mario.runFrame = 0; mario.runTimer = 0;
+    }
+
+    // draw
+    ctx.clearRect(0,0,W,H);
+
+    // background parallax
+    ctx.fillStyle = '#0b1220'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle = '#0e1730'; ctx.fillRect(0,0,W, H*0.65);
+
+    // platforms
+    for (const p of platforms){
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x, p.y, p.w, p.h);
+    }
+
+    // flag
+    ctx.fillStyle = flag.color;
+    ctx.fillRect(flag.x, flag.y, flag.w, flag.h);
+    // small banner
+    ctx.fillStyle = '#34d399';
+    ctx.fillRect(flag.x+flag.w, flag.y, 24, 14);
+
+    // coins
+    for (const c of coins){
+      if (c.taken) continue;
+      const g = ctx.createRadialGradient(c.x, c.y, 2, c.x, c.y, c.r);
+      g.addColorStop(0, '#fff0a3'); g.addColorStop(1, '#f2c94c');
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, Math.PI*2); ctx.fill();
+      ctx.strokeStyle = '#996515'; ctx.lineWidth = 2; ctx.stroke();
+    }
+
+    // mario sprite (simple animated rectangles + "face")
+    // body
+    const bodyColor = '#60a5fa';
+    const faceColor = '#fde68a';
+    const x = mario.x, y = mario.y, w = mario.w, h = mario.h;
+
+    // legs animation (alternate rectangles)
+    ctx.fillStyle = bodyColor;
+    ctx.fillRect(x, y+h-14, w, 14); // base
+    if (mario.onGround){
+      if (mario.runFrame % 2 === 0){
+        ctx.fillRect(x, y+h-14, 10, 14);
+      }else{
+        ctx.fillRect(x+w-10, y+h-14, 10, 14);
+      }
+    }
+
+    // torso
+    ctx.fillRect(x, y+12, w, h-26);
+
+    // head
+    ctx.fillStyle = faceColor;
+    ctx.fillRect(x+6, y, 22, 18);
+
+    // face details (eyes + direction)
+    ctx.fillStyle = '#1f2937';
+    const eyeDX = mario.dir === 1 ? 3 : -3;
+    ctx.fillRect(x+12+eyeDX, y+6, 3, 3);
+    ctx.fillRect(x+18+eyeDX, y+6, 3, 3);
+
+    // jump squash & stretch hint
+    if (!mario.onGround){
+      ctx.globalAlpha = 0.25;
+      ctx.fillStyle = '#60a5fa';
+      ctx.fillRect(x, y+h, w, 6);
+      ctx.globalAlpha = 1.0;
+    }
+
+    // victory glow
+    if (atFlag){
+      ctx.save();
+      ctx.globalAlpha = 0.15;
+      ctx.fillStyle = '#22d3ee';
+      ctx.fillRect(flag.x-20, flag.y-20, 80, flag.h+40);
+      ctx.restore();
+    }
+
+    requestAnimationFrame(step);
+  }
+
+  // start
+  reset();
+  requestAnimationFrame(step);
+})();
+</script>
+"""
+
+st_html(GAME_HTML, height=560, scrolling=False)
