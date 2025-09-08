@@ -1,3 +1,5 @@
+# app.py — Super Mario (Mini) — colored tiles renderer (no emojis), same template & guardrails
+
 import os
 import time
 import json
@@ -16,7 +18,7 @@ except Exception:
 # ======================= App Config =======================
 st.set_page_config(page_title="Super Mario (Mini)", layout="wide")
 
-# ======================= Runtime budget & limits =======================
+# ======================= Runtime budget & limits (matches your template) =======================
 BUDGET_URL = os.getenv(
     "BUDGET_URL",
     "https://raw.githubusercontent.com/RahulBhattacharya1/shared_config/main/budget.py",
@@ -40,7 +42,6 @@ def _fetch(u: str) -> dict:
     return {k: getattr(mod, k, DEF[k]) for k in DEF}
 
 def _load_cfg(ttl: int = 300) -> dict:
-    """Cache remote cfg in session with TTL; allow env overrides."""
     now = time.time()
     cache = st.session_state.get("_budget_cache")
     ts = st.session_state.get("_budget_cache_ts", 0)
@@ -113,41 +114,91 @@ def _record_success():
 # ======================= Mini “platformer” world =======================
 W, H = 12, 6  # width, height
 
+# Tile keys
+AIR = " "
+GROUND = "_"
+COIN = "o"
+FLAG = "F"
+
+# Colored tile renderer (no emojis)
+TILE_PX = 28  # size of each square
+PALETTE = {
+    AIR:   "#0b1220",  # dark background (sky)
+    GROUND:"#8B5A2B",  # brown
+    COIN:  "#f2c94c",  # gold
+    FLAG:  "#2dd4bf",  # teal flag tile
+    "M":   "#60a5fa",  # player
+}
+
 def new_level():
-    grid = [[" "]*W for _ in range(H)]
+    grid = [[AIR]*W for _ in range(H)]
     # ground
     for x in range(W):
-        grid[H-1][x] = "_"
+        grid[H-1][x] = GROUND
     # simple platforms
     for x in range(2, 10, 3):
-        grid[H-3][x] = "_"
+        grid[H-3][x] = GROUND
     # coins and flag
     coins = {(H-2, 5), (H-3, 2), (H-3, 8)}
     mario_start = (H-2, 1)
     flag = (H-2, W-2)
     return grid, mario_start, coins, flag
 
-def render(grid, mario, coins, flag, brand):
-    rows = []
+def render(grid, mario, coins, flag):
+    # Build a tiny CSS grid using inline HTML for crisp colored squares.
+    rows_html = []
     for r in range(H):
-        line = []
+        cells = []
         for c in range(W):
-            ch = grid[r][c]
+            key = grid[r][c]
+            # overlay order: Mario > Flag > Coin > Ground/Air
             if (r, c) == mario:
-                ch = "M"
+                color = PALETTE["M"]
             elif (r, c) == flag:
-                ch = "F"
+                color = PALETTE[FLAG]
             elif (r, c) in coins:
-                ch = "o"
-            line.append(ch)
-        rows.append("".join(line))
-    st.markdown(
-        f"<pre style='font-size:14px; color:{brand}'>{chr(10).join(rows)}</pre>",
-        unsafe_allow_html=True
-    )
+                color = PALETTE[COIN]
+            else:
+                color = PALETTE[key]
+            cells.append(
+                f"<span class='cell' style='background:{color}'></span>"
+            )
+        rows_html.append("<div class='row'>" + "".join(cells) + "</div>")
+
+    html = f"""
+<div class="board">
+  {''.join(rows_html)}
+</div>
+<style>
+.board {{
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  background: #0a0f1a;
+  border-radius: 12px;
+  box-shadow: 0 6px 24px rgba(0,0,0,.35);
+}}
+.board .row {{
+  display: inline-flex;
+  gap: 4px;
+}}
+.board .cell {{
+  display: inline-block;
+  width: {TILE_PX}px;
+  height: {TILE_PX}px;
+  border-radius: 6px;
+}}
+/* Light outline to separate ground from sky slightly */
+.board .cell[style*="{PALETTE[GROUND]}"] {{
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,.25);
+}}
+</style>
+"""
+    st.markdown(html, unsafe_allow_html=True)
 
 def solid(grid, r, c):
-    return not (0 <= r < H and 0 <= c < W) or grid[r][c] == "_"
+    return not (0 <= r < H and 0 <= c < W) or grid[r][c] == GROUND
 
 def step_physics(grid, mario, vy):
     r, c = mario
@@ -168,6 +219,7 @@ def move_lr(grid, mario, dx):
     return (r, c)
 
 def offline_policy(mario, flag):
+    # Simple greedy policy: move toward flag; occasionally jump
     mr, mc = mario
     fr, fc = flag
     if fc > mc:
@@ -210,7 +262,6 @@ with st.sidebar:
     st.subheader("Generator")
     provider = st.selectbox("Provider", ["OpenAI", "Offline (rule-based)"])
     model    = st.selectbox("Model (OpenAI)", ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"])
-    brand    = "#0F62FE"
     temp     = st.slider("Creativity (OpenAI)", 0.0, 1.0, 0.4, 0.05)
     max_tok  = st.slider("Max tokens (OpenAI)", 256, 2048, 500, 32)
 
@@ -235,8 +286,8 @@ if "mario" not in st.session_state:
 
 S = st.session_state.mario
 
-# Render initial view
-render(S["grid"], S["mario"], S["coins"], S["flag"], brand)
+# Render current board
+render(S["grid"], S["mario"], S["coins"], S["flag"])
 
 # Controls
 c1, c2, c3, c4 = st.columns(4)
@@ -287,8 +338,6 @@ if S["mario"] in S["coins"]:
     S["coins"].remove(S["mario"])
     S["score"] += 1
 
-# Render updated world
-render(S["grid"], S["mario"], S["coins"], S["flag"], brand)
-
-msg = "Flag reached!" if S["mario"] == S["flag"] else f"Coins: {S['score']}"
-card("Status", msg)
+# Re-render updated world
+render(S["grid"], S["mario"], S["coins"], S["flag"])
+card("Status", f"Coins: {S['score']}" if S["mario"] != S["flag"] else "Flag reached!")
