@@ -187,7 +187,7 @@ if autopilot:
 
 # When Autopilot is on, refresh roughly every 700ms to fetch the next move
 if autopilot:
-    st.autorefresh(interval=700, key="ai_tick")
+    st.experimental_autorefresh(interval=700, key="ai_tick")
 
 # ======================= Canvas Game (arrow keys + animation) =======================
 GAME_HTML = """
